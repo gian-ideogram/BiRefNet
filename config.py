@@ -5,26 +5,26 @@ import math
 class Config():
     def __init__(self) -> None:
         # Main active settings
-        self.batch_size = 8                                     # Multi-GPU+BF16 training for 76GB / 62GB, without/with compile, on each A100.
-        self.compile = True                                     # 1. PyTorch<=2.0.1 has an inherent CPU memory leak problem; 2.0.1<PyTorch<2.5.0 cannot successfully compile.
-        self.mixed_precision = ['no', 'fp16', 'bf16', 'fp8'][2] # 2. FP8 doesn't show acceleration in the torch.compile mode.
+        self.batch_size = 4                                    # Multi-GPU+BF16 training for 76GB / 62GB, without/with compile, on each A100.
+        self.compile = False # turn on after                    # 1. PyTorch<=2.0.1 has an inherent CPU memory leak problem; 2.0.1<PyTorch<2.5.0 cannot successfully compile.
+        self.mixed_precision = ['no', 'fp16', 'bf16', 'fp8'][1] # 2. FP8 doesn't show acceleration in the torch.compile mode.
         self.SDPA_enabled = True                                # H200x1 + compile==True.  None: 43GB + 14s, math: 43GB + 15s, mem_eff: 35GB + 15s.
                                                                 # H200x1 + compile==False. None: 54GB + 25s, math: 51GB + 26s, mem_eff: 40GB + 25s.
 
         # PATH settings
         # Make up your file system as: SYS_HOME_DIR/codes/dis/BiRefNet, SYS_HOME_DIR/datasets/dis/xx, SYS_HOME_DIR/weights/xx
-        self.sys_home_dir = [os.path.expanduser('~'), '/workspace'][1]   # Default, custom
+        self.sys_home_dir = [os.path.expanduser('~'), '/home/gianfavero/projects/birefnet-project'][1]   # Default, custom
         self.data_root_dir = os.path.join(self.sys_home_dir, 'datasets/dis')
 
         # TASK settings
-        self.task = ['DIS5K', 'COD', 'HRSOD', 'General', 'General-2K', 'Matting'][0]
+        self.task = ['DIS5K', 'COD', 'HRSOD', 'Custom', 'General-2K', 'Matting'][3]
         self.testsets = {
             # Benchmarks
             'DIS5K': ','.join(['DIS-VD', 'DIS-TE1', 'DIS-TE2', 'DIS-TE3', 'DIS-TE4'][:1]),
             'COD': ','.join(['CHAMELEON', 'NC4K', 'TE-CAMO', 'TE-COD10K']),
             'HRSOD': ','.join(['DAVIS-S', 'TE-HRSOD', 'TE-UHRSD', 'DUT-OMRON', 'TE-DUTS']),
             # Practical use
-            'General': ','.join(['DIS-VD', 'TE-P3M-500-NP']),
+            'Custom': ','.join(['tshirt_logo_svg_val']),
             'General-2K': ','.join(['DIS-VD', 'TE-P3M-500-NP']),
             'Matting': ','.join(['TE-P3M-500-NP', 'TE-AM-2k']),
         }[self.task]
@@ -33,7 +33,7 @@ class Config():
             'DIS5K': ['DIS-TR', 'DIS-TR+DIS-TE1+DIS-TE2+DIS-TE3+DIS-TE4'][0],
             'COD': 'TR-COD10K+TR-CAMO',
             'HRSOD': ['TR-DUTS', 'TR-HRSOD', 'TR-UHRSD', 'TR-DUTS+TR-HRSOD', 'TR-DUTS+TR-UHRSD', 'TR-HRSOD+TR-UHRSD', 'TR-DUTS+TR-HRSOD+TR-UHRSD'][5],
-            'General': datasets_all,
+            'Custom': 'tshirt_logo_svg_train',
             'General-2K': datasets_all,
             'Matting': datasets_all,
         }[self.task]
@@ -41,12 +41,12 @@ class Config():
         # Data settings
         self.size = (1024, 1024) if self.task not in ['General-2K'] else (2560, 1440)   # wid, hei. Can be overwritten by dynamic_size in training.
         self.dynamic_size = [None, ((512-256, 2048+256), (512-256, 2048+256))][0]    # wid, hei. It might cause errors in using compile.
-        self.background_color_synthesis = False             # whether to use pure bg color to replace the original backgrounds.
+        self.background_color_synthesis = True             # whether to use pure bg color to replace the original backgrounds.
 
         # Faster-Training settings
         self.precisionHigh = True
-        self.load_all = False and self.dynamic_size is None     # Turn it on/off by your case. It may consume a lot of CPU memory. And for multi-GPU (N), it would cost N times the CPU memory to load the data.
-                                                                #   Machines with > 70GB CPU memory can run the whole training on DIS5K with default setting.
+        self.load_all = True and self.dynamic_size is True      # Turn it on/off by your case. It may consume a lot of CPU memory. And for multi-GPU (N), it would cost N times the CPU memory to load the data.
+                                                                # Machines with > 70GB CPU memory can run the whole training on DIS5K with default setting.
                                                                 # 2. Higher PyTorch version may fix it: https://github.com/pytorch/pytorch/issues/119607.
                                                                 # 3. But compile in 2.0.1 < Pytorch < 2.5.0 seems to bring no acceleration for training.
 
@@ -68,13 +68,13 @@ class Config():
                 'DIS5K': -40,
                 'COD': -20,
                 'HRSOD': -20,
-                'General': -20,
+                'Custom': -20,
                 'General-2K': -20,
                 'Matting': -10,
             }[self.task]
         ][1]    # choose 0 to skip
-        self.lr = (1e-4 if 'DIS5K' in self.task else 1e-5) * math.sqrt(self.batch_size / 4)     # DIS needs high lr to converge faster. Adapt the lr linearly
-        self.num_workers = max(4, self.batch_size)          # will be decreased to min(it, batch_size) at the initialization of the data_loader
+        self.lr = 1e-5 #(1e-4 if 'DIS5K' in self.task else 1e-5) * math.sqrt(self.batch_size / 4)     # DIS needs high lr to converge faster. Adapt the lr linearly
+        self.num_workers = 1 #max(4, self.batch_size)          # will be decreased to min(it, batch_size) at the initialization of the data_loader
 
         # Backbone settings
         self.bb = [
@@ -133,7 +133,7 @@ class Config():
                 'cnt': 5 * 0,
                 'structure': 5 * 0,
             }
-        elif self.task in ['General', 'General-2K']:
+        elif self.task in ['Custom', 'General-2K']:
             self.lambdas_pix_last = {
                 'bce': 30 * 1,
                 'iou': 0.5 * 1,
@@ -208,7 +208,6 @@ class Config():
 # Return task for choosing settings in shell scripts.
 if __name__ == '__main__':
     import argparse
-
 
     parser = argparse.ArgumentParser(description='Only choose one argument to activate.')
     parser.add_argument('--print_task', action='store_true', help='print task name')

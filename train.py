@@ -1,12 +1,18 @@
 import os
+import gc
+import glob
 import datetime
 from contextlib import nullcontext
 import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from tqdm import tqdm
 if tuple(map(int, torch.__version__.split('+')[0].split(".")[:3])) >= (2, 5, 0):
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+# Silence TensorFlow INFO and WARNING messages (including "End of sequence" logs)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 from config import Config
 from loss import PixLoss, ClsLoss
@@ -18,6 +24,12 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
+# Ideogram
+from ideogram_dataset import SimpleTrainDataset, ideogram_transform, ideogram_collate_fn
+import threading, queue
+from concurrent.futures import ThreadPoolExecutor
+BUCKET_BATCH_SIZE = 10    # how many TFRecords to group at once
+MAX_PREFETCH = 2          # how many dataloaders to keep in memory ahead
 
 parser = argparse.ArgumentParser(description='')
 parser.add_argument('--resume', default=None, type=str, help='path to latest checkpoint')
@@ -70,39 +82,83 @@ os.makedirs(args.ckpt_dir, exist_ok=True)
 logger = Logger(os.path.join(args.ckpt_dir, "log.txt"))
 logger_loss_idx = 1
 
-# log model and optimizer params
-# logger.info("Model details:"); logger.info(model)
-# if args.use_accelerate and accelerator.mixed_precision != 'no':
-#     config.compile = False
-logger.info("datasets: load_all={}, compile={}.".format(config.load_all, config.compile))
-logger.info("Other hyperparameters:"); logger.info(args)
-print('batch size:', config.batch_size)
+if args.use_accelerate and accelerator.is_main_process:
+    logger.info("datasets: load_all={}, compile={}.".format(config.load_all, config.compile))
+    logger.info("Other hyperparameters:"); logger.info(args)
+    print('batch size:', config.batch_size)
 
-from dataset import custom_collate_fn
-
-def prepare_dataloader(dataset: torch.utils.data.Dataset, batch_size: int, to_be_distributed=False, is_train=True):
-    # Prepare dataloaders
-    if to_be_distributed:
-        return torch.utils.data.DataLoader(
-            dataset=dataset, batch_size=batch_size, num_workers=min(config.num_workers, batch_size), pin_memory=True,
-            shuffle=False, sampler=DistributedSampler(dataset), drop_last=True, collate_fn=custom_collate_fn if is_train and config.dynamic_size else None
-        )
-    else:
-        return torch.utils.data.DataLoader(
-            dataset=dataset, batch_size=batch_size, num_workers=min(config.num_workers, batch_size), pin_memory=True,
-            shuffle=is_train, sampler=None, drop_last=True, collate_fn=custom_collate_fn if is_train and config.dynamic_size else None
-        )
+######### TFRecord streaming utils #########
+def bucket_batches(buckets, size):
+    """Yield successive groups of N bucket paths."""
+    for i in range(0, len(buckets), size):
+        yield buckets[i:i+size]
 
 
-def init_data_loaders(to_be_distributed):
-    # Prepare datasets
-    train_loader = prepare_dataloader(
-        MyData(datasets=config.training_set, data_size=None if config.dynamic_size else config.size, is_train=True),
-        config.batch_size, to_be_distributed=to_be_distributed, is_train=True
+def prepare_dataloader_from_buckets(bucket_group, batch_size, to_be_distributed=False, val_size=0.1):
+    """Load a small group of buckets into a dataloader pair."""
+    datasets = [
+        SimpleTrainDataset(simple_train_name=bucket, keys=["raw_bytes"], transform=ideogram_transform)
+        for bucket in bucket_group
+    ]
+    dataset = torch.utils.data.ConcatDataset(datasets)
+
+    train_size = int(len(dataset) * (1 - val_size))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        dataset, [train_size, val_size],
+        generator=torch.Generator().manual_seed(config.rand_seed)
     )
-    print(len(train_loader), "batches of train dataloader {} have been created.".format(config.training_set))
-    return train_loader
 
+    # Build loaders
+    def make_loader(ds, sampler):
+        return torch.utils.data.DataLoader(
+            dataset=ds,
+            batch_size=batch_size,
+            num_workers=min(config.num_workers, batch_size),
+            pin_memory=True,
+            shuffle=False,
+            sampler=sampler,
+            drop_last=True,
+            collate_fn=ideogram_collate_fn,
+        )
+
+    train_sampler = DistributedSampler(train_dataset) if to_be_distributed else None
+    val_sampler = DistributedSampler(val_dataset) if to_be_distributed else None
+    train_loader = make_loader(train_dataset, train_sampler)
+    val_loader = make_loader(val_dataset, val_sampler)
+    return train_loader, val_loader
+
+
+def prefetch_dataloaders(buckets, q, batch_size, to_be_distributed, repeat=False):
+    """Background thread: prepare dataloaders and put them into queue."""
+    while True:
+        for bucket_group in bucket_batches(buckets, BUCKET_BATCH_SIZE):
+            loaders = prepare_dataloader_from_buckets(bucket_group, batch_size, to_be_distributed)
+            q.put(loaders)  # blocks if queue is full (maxsize=MAX_PREFETCH)
+        if not repeat:
+            break
+    q.put(None)  # signal end
+
+
+def stream_ideogram_loaders(buckets, batch_size, to_be_distributed, repeat=False):
+    """Yield dataloaders while prefetching the next ones."""
+    q = queue.Queue(maxsize=MAX_PREFETCH)
+    t = threading.Thread(
+        target=prefetch_dataloaders,
+        args=(buckets, q, batch_size, to_be_distributed, repeat),
+        daemon=True,
+    )
+    t.start()
+
+    while True:
+        loaders = q.get()
+        if loaders is None:
+            break
+        yield loaders
+
+        # free memory from last dataloader group
+        del loaders
+        gc.collect()
 
 def init_models_optimizers(epochs, to_be_distributed):
     # Init models
@@ -149,12 +205,14 @@ def init_models_optimizers(epochs, to_be_distributed):
 
 class Trainer:
     def __init__(
-        self, data_loaders, model_opt_lrsch,
+        self, train_loader, val_loader, model_opt_lrsch,
     ):
         self.model, self.optimizer, self.lr_scheduler = model_opt_lrsch
-        self.train_loader = data_loaders
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+
         if args.use_accelerate:
-            self.train_loader, self.model, self.optimizer = accelerator.prepare(self.train_loader, self.model, self.optimizer)
+            self.train_loader, self.val_loader, self.model, self.optimizer = accelerator.prepare(self.train_loader, self.val_loader, self.model, self.optimizer)
         if config.out_ref:
             self.criterion_gdt = nn.BCELoss()
 
@@ -164,6 +222,13 @@ class Trainer:
         
         # Others
         self.loss_log = AverageMeter()
+
+    def _test_batch(self):
+        batch = next(iter(self.train_loader))
+        inputs = batch[0]
+        gts = batch[1]
+        class_labels = batch[2]
+        return inputs, gts, class_labels
 
     def _train_batch(self, batch):
         if args.use_accelerate:
@@ -206,54 +271,130 @@ class Trainer:
             loss.backward()
         self.optimizer.step()
 
-    def train_epoch(self, epoch):
+    def _validate_batch(self, batch):
+        if args.use_accelerate:
+            inputs = batch[0]#.to(device)
+            gts = batch[1]#.to(device)
+            class_labels = batch[2]#.to(device)
+        else:
+            inputs = batch[0].to(device)
+            gts = batch[1].to(device)
+            class_labels = batch[2].to(device)
+        scaled_preds, class_preds_lst = self.model(inputs)
+        if config.out_ref:
+            (outs_gdt_pred, outs_gdt_label), scaled_preds = scaled_preds
+            for _idx, (_gdt_pred, _gdt_label) in enumerate(zip(outs_gdt_pred, outs_gdt_label)):
+                _gdt_pred = nn.functional.interpolate(_gdt_pred, size=_gdt_label.shape[2:], mode='bilinear', align_corners=True).sigmoid()
+                _gdt_label = _gdt_label.sigmoid()
+                loss_gdt = self.criterion_gdt(_gdt_pred, _gdt_label) if _idx == 0 else self.criterion_gdt(_gdt_pred, _gdt_label) + loss_gdt
+            # self.loss_dict['loss_gdt'] = loss_gdt.item()
+        if None in class_preds_lst:
+            loss_cls = 0.
+        else:
+            loss_cls = self.cls_loss(class_preds_lst, class_labels)
+            self.loss_dict['loss_cls'] = loss_cls.item()
+
+        # Loss
+        loss_pix, loss_dict_pix = self.pix_loss(scaled_preds, torch.clamp(gts, 0, 1), pix_loss_lambda=1.0)
+        self.loss_dict.update(loss_dict_pix)
+        self.loss_dict['loss_pix'] = loss_pix.item()
+        # since there may be several losses for sal, the lambdas for them (lambdas_pix) are inside the loss.py
+        loss = loss_pix + loss_cls
+        if config.out_ref:
+            loss = loss + loss_gdt * 1.0
+
+        self.loss_log.update(loss.item(), inputs.size(0))
+
+    def train_epoch(self, steps):
         global logger_loss_idx
         self.model.train()
         self.loss_dict = {}
-        if epoch > args.epochs + config.finetune_last_epochs:
-            if config.task == 'Matting':
-                self.pix_loss.lambdas_pix_last['mae'] *= 1
-                self.pix_loss.lambdas_pix_last['mse'] *= 0.9
-                self.pix_loss.lambdas_pix_last['ssim'] *= 0.9
-            else:
-                self.pix_loss.lambdas_pix_last['bce'] *= 0
-                self.pix_loss.lambdas_pix_last['ssim'] *= 1
-                self.pix_loss.lambdas_pix_last['iou'] *= 0.5
-                self.pix_loss.lambdas_pix_last['mae'] *= 0.9
+        # if epoch > args.epochs + config.finetune_last_epochs:
+        #     if config.task == 'Matting':
+        #         self.pix_loss.lambdas_pix_last['mae'] *= 1
+        #         self.pix_loss.lambdas_pix_last['mse'] *= 0.9
+        #         self.pix_loss.lambdas_pix_last['ssim'] *= 0.9
+        #     else:
+        #         self.pix_loss.lambdas_pix_last['bce'] *= 0
+        #         self.pix_loss.lambdas_pix_last['ssim'] *= 1
+        #         self.pix_loss.lambdas_pix_last['iou'] *= 0.5
+        #         self.pix_loss.lambdas_pix_last['mae'] *= 0.9
 
         for batch_idx, batch in enumerate(self.train_loader):
-            # with nullcontext if not args.use_accelerate or accelerator.gradient_accumulation_steps <= 1 else accelerator.accumulate(self.model):
             self._train_batch(batch)
             # Logger
-            if (epoch < 2 and batch_idx < 100 and batch_idx % 20 == 0) or batch_idx % max(100, len(self.train_loader) / 100 // 100 * 100) == 0:
-                info_progress = f'Epoch[{epoch}/{args.epochs}] Iter[{batch_idx}/{len(self.train_loader)}].'
+            if batch_idx % max(100, len(self.train_loader) / 100 // 100 * 100) == 0:
+                info_progress = f'Step[{steps + batch_idx}].'
                 info_loss = 'Training Losses:'
                 for loss_name, loss_value in self.loss_dict.items():
                     info_loss += f' {loss_name}: {loss_value:.5g} |'
-                logger.info(' '.join((info_progress, info_loss)))
-        info_loss = f'@==Final== Epoch[{epoch}/{args.epochs}]  Training Loss: {self.loss_log.avg:.5g}  '
-        logger.info(info_loss)
+                if args.use_accelerate and accelerator.is_main_process:
+                    logger.info(' '.join((info_progress, info_loss)))
+        info_loss = f'@==Final== Step[{steps + batch_idx}]  Training Loss: {self.loss_log.avg:.5g}  '
+        if args.use_accelerate and accelerator.is_main_process:
+            logger.info(info_loss)
 
         self.lr_scheduler.step()
         return self.loss_log.avg
 
+    @torch.no_grad()
+    def validate_epoch(self, steps):
+        global logger_loss_idx
+        self.loss_dict = {}
+        self.loss_log.reset()
+
+        for batch_idx, batch in enumerate(self.val_loader):
+            self._validate_batch(batch)
+            # Logger
+            if batch_idx % max(100, len(self.val_loader) / 100 // 100 * 100) == 0:
+                info_progress = f'Step[{steps}].'
+                info_loss = 'Validation Losses:'
+                for loss_name, loss_value in self.loss_dict.items():
+                    info_loss += f' {loss_name}: {loss_value:.5g} |'
+                if args.use_accelerate and accelerator.is_main_process:
+                    logger.info(' '.join((info_progress, info_loss)))
+        info_loss = f'@==Final== Step[{steps}]  Validation Loss: {self.loss_log.avg:.5g}  '
+        if args.use_accelerate and accelerator.is_main_process:
+            logger.info(info_loss)
+
+        return self.loss_log.avg
 
 def main():
+    # Put Ideogram GCP data buckets here
+    buckets = [f"gs://ideogram-data-snapshots-us-east5/loras/rgba100k/mp.tfr-{i:05d}" for i in range(0, 512)]
+    buckets.extend([
+        "gs://ideogram-data-snapshots-us-east5/loras/rgba100k/tee_logo_1k.tfr",
+    ])
 
-    trainer = Trainer(
-        data_loaders=init_data_loaders(to_be_distributed),
-        model_opt_lrsch=init_models_optimizers(args.epochs, to_be_distributed)
-    )
+    # Streaming dataloaders
+    stream = stream_ideogram_loaders(buckets, config.batch_size, to_be_distributed, repeat=True)
 
-    for epoch in range(epoch_st, args.epochs+1):
-        train_loss = trainer.train_epoch(epoch)
-        # Save checkpoint
-        if epoch >= args.epochs - config.save_last and epoch % config.save_step == 0:
+    # Initialize models and optimizers
+    model_opt_lrsch = init_models_optimizers(args.epochs, to_be_distributed)
+
+    # Train
+    steps = 0
+    for i, (train_loader, val_loader) in enumerate(stream):
+        trainer = Trainer(train_loader, val_loader, model_opt_lrsch)
+        
+        trainer.train_epoch(steps)
+        steps += len(train_loader)
+
+        if i % 10 == 0:
+            with torch.no_grad():
+                trainer.validate_epoch(steps)
+
             if args.use_accelerate:
                 state_dict = trainer.model.state_dict()
             else:
                 state_dict = trainer.model.module.state_dict() if to_be_distributed else trainer.model.state_dict()
-            torch.save(state_dict, os.path.join(args.ckpt_dir, 'epoch_{}.pth'.format(epoch)))
+            torch.save(state_dict, os.path.join(args.ckpt_dir, 'step_{}.pth'.format(steps)))
+
+        # free memory before moving to next batch
+        del trainer, train_loader, val_loader
+        torch.cuda.empty_cache()
+        gc.collect()
+
     if to_be_distributed:
         destroy_process_group()
 
