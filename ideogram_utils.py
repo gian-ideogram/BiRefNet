@@ -5,6 +5,7 @@ from PIL import Image
 import random
 import colorsys
 import numpy as np
+import cv2
 
 def pil_image_to_bytes(pil_image: PIL.Image.Image) -> bytes:
     buffer = io.BytesIO()
@@ -204,3 +205,34 @@ def generate_background(
         return Image.fromarray(img, "RGB")
     else:
         raise ValueError(f"Unknown background mode: {mode}")
+
+## CPU version refinement
+def FB_blur_fusion_foreground_estimator_cpu(image, FG, B, alpha, r=90):
+    if isinstance(image, Image.Image):
+        image = np.array(image) / 255.0
+    blurred_alpha = cv2.blur(alpha, (r, r))[:, :, None]
+
+    blurred_FGA = cv2.blur(FG * alpha, (r, r))
+    blurred_FG = blurred_FGA / (blurred_alpha + 1e-5)
+
+    blurred_B1A = cv2.blur(B * (1 - alpha), (r, r))
+    blurred_B = blurred_B1A / ((1 - blurred_alpha) + 1e-5)
+    FG = blurred_FG + alpha * (image - alpha * blurred_FG - (1 - alpha) * blurred_B)
+    FG = np.clip(FG, 0, 1)
+    return FG, blurred_B
+
+def FB_blur_fusion_foreground_estimator_cpu_2(image, alpha, r=90):
+    # Thanks to the source: https://github.com/Photoroom/fast-foreground-estimation
+    alpha = alpha[:, :, None]
+    FG, blur_B = FB_blur_fusion_foreground_estimator_cpu(image, image, image, alpha, r)
+    return FB_blur_fusion_foreground_estimator_cpu(image, FG, blur_B, alpha, r=6)[0]
+
+def reduce_spill(image, mask, r=90) -> Image.Image:
+    image = np.array(image, dtype=np.float32) / 255.0
+    mask = np.array(mask, dtype=np.float32) / 255.0
+    estimated_foreground = FB_blur_fusion_foreground_estimator_cpu_2(image, mask, r=r)
+    estimated_foreground = (estimated_foreground * 255.0).astype(np.uint8)
+
+    estimated_foreground = Image.fromarray(np.ascontiguousarray(estimated_foreground))
+
+    return estimated_foreground

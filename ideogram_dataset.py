@@ -26,13 +26,14 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 from tfrecords.simple_train.tfr import SimpleTrain
-from ideogram_utils import generate_background, paste_fg_onto_bg, crop_to_visible_area, resize_image_for_square
+from tfrecords.benchmark.tfr import BenchmarkExample
+from .ideogram_utils import generate_background, paste_fg_onto_bg, crop_to_visible_area, resize_image_for_square
 
 class ColourPalette(TypedDict):
     palette: bytes
     weight: bytes
 
-field_types = {
+simple_train_field_types = {
     "raw_bytes": bytes,
     "raw_bytes_sha256": bytes,
     "original_raw_bytes_sha256": bytes,
@@ -124,14 +125,80 @@ class SimpleTrainDataset(Dataset):
             parsed_data = {}
 
             for key in self.keys:
-                if key not in field_types:
+                if key not in simple_train_field_types:
                     raise ValueError(f"Unsupported key: {key}")
 
-                field_type = field_types[key]
+                field_type = simple_train_field_types[key]
                 field_value = getattr(ex, key)
 
                 if field_type is bytes:
                     parsed_data[key] = field_value
+                else:
+                    parsed_data[key] = field_value
+
+            parsed_examples.append(parsed_data)
+
+        return parsed_examples
+
+bm_field_types = {
+    "id": str,
+    "text": str,
+    "num_samples": int,
+    "quoted_text": str,
+    "inpainting_image": bytes,
+    "inpainting_mask": bytes,
+    "colour_palette": bytes,
+    "colour_palette_weight": bytes,
+    "style_reference_image": bytes,
+    "entity_reference_images": list,
+    "entity_reference_types": list,
+    "entity_reference_metadata": list,
+    "images": list,
+}
+
+class BenchmarkDataset(Dataset):
+    def __init__(self, writer_name: str, keys: list[str], transform = None):
+        self.writer_name = writer_name
+        self.keys = keys
+        self.benchmark = self._get_benchmark()
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.benchmark)
+
+    def __getitem__(self, idx):
+        sample = self.benchmark[idx]
+        if self.transform:
+            sample = self.transform(sample)
+        return sample
+
+    def _get_benchmark(self):
+        data = tf.data.TFRecordDataset(
+            self.writer_name
+        ).as_numpy_iterator()
+
+        parsed_data = self._parse_benchmark(data)
+
+        return parsed_data
+
+    def _parse_benchmark(self, data: list[bytes]):
+        parsed_examples = []
+
+        for serialized in data:
+            ex = BenchmarkExample.from_tf_example(serialized)
+            parsed_data = {}
+
+            for key in self.keys:
+                if key not in bm_field_types:
+                    raise ValueError(f"Unsupported key: {key}")
+
+                field_type = bm_field_types[key]
+                field_value = getattr(ex, key)
+
+                if field_type is bytes:
+                    parsed_data[key] = PIL.Image.open(BytesIO(field_value))
+                elif field_type is list: # assume list of bytes
+                    parsed_data[key] = [PIL.Image.open(BytesIO(item)) for item in field_value]
                 else:
                     parsed_data[key] = field_value
 
