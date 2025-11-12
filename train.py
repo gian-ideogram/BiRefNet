@@ -16,7 +16,6 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 from config import Config
 from loss import PixLoss, ClsLoss
-from dataset import MyData
 from models.birefnet import BiRefNet
 from utils import Logger, AverageMeter, set_seed, check_state_dict
 
@@ -24,12 +23,14 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
+import tensorflow as tf
+
 # Ideogram
 from ideogram_dataset import SimpleTrainDataset, ideogram_transform, ideogram_collate_fn
 import threading, queue
 from concurrent.futures import ThreadPoolExecutor
 BUCKET_BATCH_SIZE = 10    # how many TFRecords to group at once
-MAX_PREFETCH = 2          # how many dataloaders to keep in memory ahead
+MAX_PREFETCH = 10         # how many dataloaders to keep in memory ahead
 
 parser = argparse.ArgumentParser(description='')
 parser.add_argument('--resume', default=None, type=str, help='path to latest checkpoint')
@@ -74,7 +75,7 @@ else:
 if config.rand_seed:
     set_seed(config.rand_seed + device)
 
-epoch_st = 1
+steps_st = 0
 # make dir for ckpt
 os.makedirs(args.ckpt_dir, exist_ok=True)
 
@@ -92,7 +93,6 @@ def bucket_batches(buckets, size):
     """Yield successive groups of N bucket paths."""
     for i in range(0, len(buckets), size):
         yield buckets[i:i+size]
-
 
 def prepare_dataloader_from_buckets(bucket_group, batch_size, to_be_distributed=False, val_size=0.1):
     """Load a small group of buckets into a dataloader pair."""
@@ -141,7 +141,7 @@ def prefetch_dataloaders(buckets, q, batch_size, to_be_distributed, repeat=False
 
 
 def stream_ideogram_loaders(buckets, batch_size, to_be_distributed, repeat=False):
-    """Yield dataloaders while prefetching the next ones."""
+    """Background thread: prepare dataloaders and put them into queue."""
     q = queue.Queue(maxsize=MAX_PREFETCH)
     t = threading.Thread(
         target=prefetch_dataloaders,
@@ -156,14 +156,10 @@ def stream_ideogram_loaders(buckets, batch_size, to_be_distributed, repeat=False
             break
         yield loaders
 
-        # free memory from last dataloader group
-        del loaders
-        gc.collect()
-
 def init_models_optimizers(epochs, to_be_distributed):
     # Init models
     if config.model == 'BiRefNet':
-        model = BiRefNet(bb_pretrained=True and not os.path.isfile(str(args.resume)))
+        model = BiRefNet(bb_pretrained=False and not os.path.isfile(str(args.resume)))
     else:
         print('Undefined model: {}.'.format(config.model))
         return None
@@ -173,8 +169,11 @@ def init_models_optimizers(epochs, to_be_distributed):
             state_dict = torch.load(args.resume, map_location='cpu', weights_only=True)
             state_dict = check_state_dict(state_dict)
             model.load_state_dict(state_dict)
-            global epoch_st
-            epoch_st = int(args.resume.rstrip('.pth').split('epoch_')[-1]) + 1
+            global steps_st
+            try:
+                steps_st = int(args.resume.rstrip('.pth').split('step_')[-1]) + 1
+            except:
+                steps_st = 0
         else:
             logger.info("=> no checkpoint found at '{}'".format(args.resume))
     if not args.use_accelerate:
@@ -190,13 +189,18 @@ def init_models_optimizers(epochs, to_be_distributed):
 
     # Setting optimizer
     if config.optimizer == 'AdamW':
-        optimizer = optim.AdamW(params=[p for p in model.parameters() if p.requires_grad], lr=config.lr, weight_decay=1e-2)
+        optimizer = optim.AdamW(params=[p for p in model.parameters() if p.requires_grad], lr=config.lr, weight_decay=1e-4)
     elif config.optimizer == 'Adam':
         optimizer = optim.Adam(params=[p for p in model.parameters() if p.requires_grad], lr=config.lr, weight_decay=0)
-    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+    # lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+    #     optimizer,
+    #     milestones=[lde if lde > 0 else epochs + lde + 1 for lde in config.lr_decay_epochs],
+    #     gamma=config.lr_decay_rate
+    # )
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        milestones=[lde if lde > 0 else epochs + lde + 1 for lde in config.lr_decay_epochs],
-        gamma=config.lr_decay_rate
+        T_max=epochs,          # full run length
+        eta_min=config.lr * 0.01  # don’t go fully to zero
     )
     # logger.info("Optimizer details:"); logger.info(optimizer)
 
@@ -309,17 +313,6 @@ class Trainer:
         global logger_loss_idx
         self.model.train()
         self.loss_dict = {}
-        # if epoch > args.epochs + config.finetune_last_epochs:
-        #     if config.task == 'Matting':
-        #         self.pix_loss.lambdas_pix_last['mae'] *= 1
-        #         self.pix_loss.lambdas_pix_last['mse'] *= 0.9
-        #         self.pix_loss.lambdas_pix_last['ssim'] *= 0.9
-        #     else:
-        #         self.pix_loss.lambdas_pix_last['bce'] *= 0
-        #         self.pix_loss.lambdas_pix_last['ssim'] *= 1
-        #         self.pix_loss.lambdas_pix_last['iou'] *= 0.5
-        #         self.pix_loss.lambdas_pix_last['mae'] *= 0.9
-
         for batch_idx, batch in enumerate(self.train_loader):
             self._train_batch(batch)
             # Logger
@@ -373,17 +366,18 @@ def main():
     model_opt_lrsch = init_models_optimizers(args.epochs, to_be_distributed)
 
     # Train
-    steps = 0
+    steps = steps_st
     for i, (train_loader, val_loader) in enumerate(stream):
+        
         trainer = Trainer(train_loader, val_loader, model_opt_lrsch)
         
         trainer.train_epoch(steps)
         steps += len(train_loader)
 
-        if i % 10 == 0:
-            with torch.no_grad():
-                trainer.validate_epoch(steps)
+        if i % 2 == 0:
+            trainer.validate_epoch(steps)
 
+        if i % 10 == 0:
             if args.use_accelerate:
                 state_dict = trainer.model.state_dict()
             else:
