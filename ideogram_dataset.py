@@ -27,6 +27,7 @@ from torchvision import transforms
 
 from tfrecords.simple_train.tfr import SimpleTrain
 from tfrecords.benchmark.tfr import BenchmarkExample
+from tfrecords.eval.tfr import EvalExample
 from .ideogram_utils import generate_background, paste_fg_onto_bg, crop_to_visible_area, resize_image_for_square
 
 class ColourPalette(TypedDict):
@@ -198,6 +199,59 @@ class BenchmarkDataset(Dataset):
                 if field_type is bytes:
                     parsed_data[key] = PIL.Image.open(BytesIO(field_value))
                 elif field_type is list: # assume list of bytes
+                    parsed_data[key] = [PIL.Image.open(BytesIO(item)) for item in field_value]
+                else:
+                    parsed_data[key] = field_value
+
+            parsed_examples.append(parsed_data)
+
+        return parsed_examples
+
+eval_field_types = {
+    "prompt": BenchmarkExample,
+    "images": list[bytes],
+}
+
+class EvalDataset(Dataset):
+    def __init__(self, writer_name: str, keys: list[str], transform = None):
+        self.writer_name = writer_name
+        self.keys = keys
+        self.eval_set = self._get_eval_set()
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.eval_set)
+
+    def __getitem__(self, idx):
+        sample = self.eval_set[idx]
+        if self.transform:
+            sample = self.transform(sample)
+        return sample
+
+    def _get_eval_set(self):
+        data = tf.data.TFRecordDataset(
+            self.writer_name
+        ).as_numpy_iterator()
+
+        parsed_data = self._parse_eval_set(data)
+
+        return parsed_data
+
+    def _parse_eval_set(self, data: list[bytes]):
+        parsed_examples = []
+        for serialized in data:
+            ex = EvalExample.from_tf_example(serialized)
+            parsed_data = {}
+            for key in self.keys:
+                if key not in eval_field_types:
+                    raise ValueError(f"Unsupported key: {key}")
+
+                field_type = eval_field_types[key]
+                field_value = getattr(ex, key)
+
+                if field_type == bytes:
+                    parsed_data[key] = PIL.Image.open(BytesIO(field_value))
+                elif field_type == list[bytes]: # assume list of bytes
                     parsed_data[key] = [PIL.Image.open(BytesIO(item)) for item in field_value]
                 else:
                     parsed_data[key] = field_value

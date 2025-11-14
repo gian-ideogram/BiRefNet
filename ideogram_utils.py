@@ -236,3 +236,28 @@ def reduce_spill(image, mask, r=90) -> Image.Image:
     estimated_foreground = Image.fromarray(np.ascontiguousarray(estimated_foreground))
 
     return estimated_foreground
+
+def recover_original_rgba(composited_rgb, alpha, bg_color=(0,255,0)):
+    """
+    Recover original RGBA after compositing on a solid background.
+    
+    composited_rgb: PIL RGB image of the pasted result
+    alpha: PIL grayscale image containing the alpha channel (0–255)
+    bg_color: background (R,G,B) tuple used during compositing
+    """
+    C = np.array(composited_rgb).astype(np.float32)
+    A = np.array(alpha).astype(np.float32) / 255.0
+
+    B = np.array(bg_color, dtype=np.float32)[None, None, :]
+
+    F = np.zeros_like(C)
+
+    mask = A > 0
+    F[mask] = (C[mask] - B * (1 - A[mask,None])) / A[mask,None]
+
+    # clamp
+    F = np.clip(F, 0, 255)
+
+    # reassemble RGBA
+    out = np.dstack([F, A * 255]).astype(np.uint8)
+    return Image.fromarray(out, "RGBA")
