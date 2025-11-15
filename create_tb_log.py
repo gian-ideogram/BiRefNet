@@ -5,13 +5,11 @@ import math
 
 from torch.utils.tensorboard import SummaryWriter
 
-STEPS_PER_EPOCH = 101
-
-def parse_manual_log(log_path):
+def parse_manual_log(log_path, steps_per_epoch=101):
     """
     Parse a BiRefNet-style training log file into a structured dictionary:
     {
-      epoch_number: {
+      step_number: {
         'bce': float,
         'iou': float,
         'ssim': float,
@@ -20,15 +18,17 @@ def parse_manual_log(log_path):
         'final': float
       }
     }
+    
+    This version converts epoch numbers to step numbers assuming training started from epoch 244.
     """
     # Pattern for iteration loss lines
     iter_pattern = re.compile(
-        r"Epoch\[(\d+)/\d+\].*Training Losses: bce:\s([\d\.eE+-]+)\s\|\siou:\s([\d\.eE+-]+)\s\|\sssim:\s([\d\.eE+-]+)\s\|\smae:\s([\d\.eE+-]+)\s\|\sloss_pix:\s([\d\.eE+-]+)"
+        r"Step\[(\d+)\]\.\s+Training Losses: bce:\s([\d\.eE+-]+)\s\|\siou:\s([\d\.eE+-]+)\s\|\sssim:\s([\d\.eE+-]+)\s\|\smae:\s([\d\.eE+-]+)\s\|\sloss_pix:\s([\d\.eE+-]+)"
     )
 
     # Pattern for final summary line
     final_pattern = re.compile(
-        r"@==Final==\sEpoch\[(\d+)/\d+\]\s+Training Loss:\s([\d\.eE+-]+)"
+        r"@==Final==\sStep\[(\d+)\]\s+Training Loss:\s([\d\.eE+-]+)"
     )
 
     results = {}
@@ -39,7 +39,7 @@ def parse_manual_log(log_path):
             iter_match = iter_pattern.search(line)
             if iter_match:
                 epoch = int(iter_match.group(1))
-                step = (epoch - 244) * STEPS_PER_EPOCH
+                step = (epoch - 244) * steps_per_epoch
                 # only record first one if we haven't already
                 if step not in results:
                     bce, iou, ssim, mae, loss_pix = map(float, iter_match.groups()[1:])
@@ -55,7 +55,7 @@ def parse_manual_log(log_path):
             final_match = final_pattern.search(line)
             if final_match:
                 epoch = int(final_match.group(1))
-                step = (epoch - 244) * STEPS_PER_EPOCH
+                step = (epoch - 244) * steps_per_epoch
                 # only record first final loss if not already stored
                 if "final" not in results.get(step, {}):
                     final_loss = float(final_match.group(2))
@@ -80,12 +80,12 @@ def parse_training_log(log_path):
     """
     # Regex to match the training loss line
     iter_pattern = re.compile(
-        r"Epoch\[(\d+)/\d+\].*Training Losses: bce:\s([\d\.eE+-]+)\s\|\siou:\s([\d\.eE+-]+)\s\|\sssim:\s([\d\.eE+-]+)\s\|\smae:\s([\d\.eE+-]+)\s\|\sloss_pix:\s([\d\.eE+-]+)"
+        r"Step\[(\d+)\]\.\s+Training Losses: bce:\s([\d\.eE+-]+)\s\|\siou:\s([\d\.eE+-]+)\s\|\sssim:\s([\d\.eE+-]+)\s\|\smae:\s([\d\.eE+-]+)\s\|\sloss_pix:\s([\d\.eE+-]+)"
     )
 
     # Regex to match the final epoch summary line
     final_pattern = re.compile(
-        r"@==Final==\sEpoch\[(\d+)/\d+\]\s+Training Loss:\s([\d\.eE+-]+)"
+        r"@==Final==\sStep\[(\d+)\]\s+Training Loss:\s([\d\.eE+-]+)"
     )
 
     results = {}
@@ -95,8 +95,7 @@ def parse_training_log(log_path):
             # Match the iteration loss line
             iter_match = iter_pattern.search(line)
             if iter_match:
-                epoch = int(iter_match.group(1))
-                step = (epoch - 244) * STEPS_PER_EPOCH  # steps starts at 0
+                step = int(iter_match.group(1))
                 bce, iou, ssim, mae, loss_pix = map(float, iter_match.groups()[1:])
                 results.setdefault(step, {})  # use step instead of epoch
                 results[step].update({
@@ -110,8 +109,7 @@ def parse_training_log(log_path):
             # Match the final line
             final_match = final_pattern.search(line)
             if final_match:
-                epoch = int(final_match.group(1))
-                step = (epoch - 244) * STEPS_PER_EPOCH  # final loss after full epoch, assign to end-of-epoch step
+                step = int(final_match.group(1))
                 final_loss = float(final_match.group(2))
                 results.setdefault(step, {})
                 results[step]["final"] = final_loss
@@ -134,12 +132,12 @@ def parse_validation_log(log_path):
     """
     # Regex to match the validation loss line
     iter_pattern = re.compile(
-            r"Epoch\[(\d+)/\d+\].*Validation Losses: bce:\s([\d\.eE+-]+)\s\|\siou:\s([\d\.eE+-]+)\s\|\sssim:\s([\d\.eE+-]+)\s\|\smae:\s([\d\.eE+-]+)\s\|\sloss_pix:\s([\d\.eE+-]+)"
+            r"Step\[(\d+)\]\.\s+Validation Losses: bce:\s([\d\.eE+-]+)\s\|\siou:\s([\d\.eE+-]+)\s\|\sssim:\s([\d\.eE+-]+)\s\|\smae:\s([\d\.eE+-]+)\s\|\sloss_pix:\s([\d\.eE+-]+)"
     )
 
     # Regex to match the final epoch summary line
     final_pattern = re.compile(
-        r"@==Final==\sEpoch\[(\d+)/\d+\]\s+Validation Loss:\s([\d\.eE+-]+)"
+        r"@==Final==\sStep\[(\d+)\]\s+Validation Loss:\s([\d\.eE+-]+)"
     )
 
     results = {}
@@ -149,8 +147,7 @@ def parse_validation_log(log_path):
             # Match the iteration loss line
             iter_match = iter_pattern.search(line)
             if iter_match:
-                epoch = int(iter_match.group(1))
-                step = (epoch - 244) * STEPS_PER_EPOCH  # steps starts at 0
+                step = int(iter_match.group(1))
                 bce, iou, ssim, mae, loss_pix = map(float, iter_match.groups()[1:])
                 results.setdefault(step, {})  # use step instead of epoch
                 results[step].update({
@@ -164,20 +161,20 @@ def parse_validation_log(log_path):
             # Match the final line
             final_match = final_pattern.search(line)
             if final_match:
-                epoch = int(final_match.group(1))
-                step = (epoch - 244) * STEPS_PER_EPOCH  # final loss after full epoch, assign to end-of-epoch step
+                step = int(final_match.group(1))
                 final_loss = float(final_match.group(2))
                 results.setdefault(step, {})
                 results[step]["final"] = final_loss
 
     return results
 
-def parse_eval_table_to_steps(text):
+def parse_eval_table_to_steps(text, steps_per_epoch=101):
     """
     Parse an ASCII evaluation table into a dictionary keyed by training steps.
 
     Args:
         text (str): multiline table text
+        steps_per_epoch (int): number of steps per epoch, used for converting epochs to steps
 
     Returns:
         dict: {step_number: {metric_name: float, ...}}
@@ -203,7 +200,7 @@ def parse_eval_table_to_steps(text):
             continue
 
         epoch = int(match.group(1))
-        step = (epoch - 244) * STEPS_PER_EPOCH
+        step = (epoch - 244) * steps_per_epoch
 
         epoch_data = {}
         for key, val in row.items():
@@ -273,10 +270,10 @@ if __name__ == "__main__":
     }
 
     # Define path to log files
-    train_log_path = "/home/gianfavero/projects/birefnet-project/codes/dis/BiRefNet/ckpts/varied_1e-5/log.txt" # same log for both
+    train_log_path = "/home/gianfavero/projects/BiRefNet/ckpts/test/log.txt" # same log for both
 
     # Define path to save the TensorBoard logs
-    tb_log_dir = "ckpts/tensorboard/varied_1e-5"
+    tb_log_dir = "ckpts/tensorboard/test"
 
     # Parse the training log file
     parsed_log = parse_training_log(train_log_path)

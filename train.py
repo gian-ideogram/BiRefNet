@@ -29,8 +29,8 @@ import tensorflow as tf
 from ideogram_dataset import SimpleTrainDataset, ideogram_transform, ideogram_collate_fn
 import threading, queue
 from concurrent.futures import ThreadPoolExecutor
-BUCKET_BATCH_SIZE = 10    # how many TFRecords to group at once
-MAX_PREFETCH = 10         # how many dataloaders to keep in memory ahead
+BUCKET_BATCH_SIZE = 50    # how many TFRecords to group at once
+MAX_PREFETCH = 50         # how many dataloaders to keep in memory ahead
 
 parser = argparse.ArgumentParser(description='')
 parser.add_argument('--resume', default=None, type=str, help='path to latest checkpoint')
@@ -328,7 +328,7 @@ class Trainer:
             logger.info(info_loss)
 
         self.lr_scheduler.step()
-        return self.loss_log.avg
+        return steps + batch_idx + 1, self.loss_log.avg
 
     @torch.no_grad()
     def validate_epoch(self, steps):
@@ -371,11 +371,10 @@ def main():
         
         trainer = Trainer(train_loader, val_loader, model_opt_lrsch)
         
-        trainer.train_epoch(steps)
-        steps += len(train_loader)
+        steps, train_loss = trainer.train_epoch(steps)
 
-        if i % 2 == 0:
-            trainer.validate_epoch(steps)
+        if i % 5 == 0:
+            val_loss = trainer.validate_epoch(steps)
 
         if i % 10 == 0:
             if args.use_accelerate:
