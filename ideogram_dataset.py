@@ -28,7 +28,7 @@ from torchvision import transforms
 from tfrecords.simple_train.tfr import SimpleTrain
 from tfrecords.benchmark.tfr import BenchmarkExample
 from tfrecords.eval.tfr import EvalExample
-from .ideogram_utils import generate_background, paste_fg_onto_bg, crop_to_visible_area, resize_image_for_square
+from ideogram_utils import generate_background, paste_fg_onto_bg, crop_to_visible_area, resize_image_for_square
 
 class ColourPalette(TypedDict):
     palette: bytes
@@ -259,3 +259,5 @@ class EvalDataset(Dataset):
             parsed_examples.append(parsed_data)
 
         return parsed_examples
+
+# Make a tensorflow dataset so that data gets properly shuffled and repeated

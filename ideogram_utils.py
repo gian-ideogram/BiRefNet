@@ -129,7 +129,7 @@ def generate_background(
       - 'hard_negative': hard negative background
     """
     if mode is None:
-        sampling_weights = [0.4, 0.1, 0.1, 0.4]
+        sampling_weights = [0.3, 0.0, 0.3, 0.3]
         mode = random.choices(["uniform", "gradient", "green", "hard_negative"], weights=sampling_weights)[0]
 
     # Utility: convert HSL → RGB [0-255]
