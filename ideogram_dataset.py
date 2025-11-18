@@ -259,5 +259,3 @@ class EvalDataset(Dataset):
             parsed_examples.append(parsed_data)
 
         return parsed_examples
-
-# Make a tensorflow dataset so that data gets properly shuffled and repeated

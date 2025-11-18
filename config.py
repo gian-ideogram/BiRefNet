@@ -5,51 +5,18 @@ import math
 class Config():
     def __init__(self) -> None:
         # Main active settings
-        self.batch_size = 4                                    # Multi-GPU+BF16 training for 76GB / 62GB, without/with compile, on each A100.
+        self.batch_size = 4                                     # Multi-GPU+BF16 training for 76GB / 62GB, without/with compile, on each A100.
         self.compile = False # turn on after                    # 1. PyTorch<=2.0.1 has an inherent CPU memory leak problem; 2.0.1<PyTorch<2.5.0 cannot successfully compile.
         self.mixed_precision = ['no', 'fp16', 'bf16', 'fp8'][1] # 2. FP8 doesn't show acceleration in the torch.compile mode.
         self.SDPA_enabled = True                                # H200x1 + compile==True.  None: 43GB + 14s, math: 43GB + 15s, mem_eff: 35GB + 15s.
                                                                 # H200x1 + compile==False. None: 54GB + 25s, math: 51GB + 26s, mem_eff: 40GB + 25s.
 
-        # PATH settings
-        # Make up your file system as: SYS_HOME_DIR/codes/dis/BiRefNet, SYS_HOME_DIR/datasets/dis/xx, SYS_HOME_DIR/weights/xx
-        self.sys_home_dir = [os.path.expanduser('~'), '/home/gianfavero/projects/birefnet-project'][1]   # Default, custom
-        self.data_root_dir = os.path.join(self.sys_home_dir, 'datasets/dis')
-
         # TASK settings
-        self.task = ['DIS5K', 'COD', 'HRSOD', 'Custom', 'General-2K', 'Matting'][3]
-        self.testsets = {
-            # Benchmarks
-            'DIS5K': ','.join(['DIS-VD', 'DIS-TE1', 'DIS-TE2', 'DIS-TE3', 'DIS-TE4'][:1]),
-            'COD': ','.join(['CHAMELEON', 'NC4K', 'TE-CAMO', 'TE-COD10K']),
-            'HRSOD': ','.join(['DAVIS-S', 'TE-HRSOD', 'TE-UHRSD', 'DUT-OMRON', 'TE-DUTS']),
-            # Practical use
-            'Custom': ','.join(['tshirt_logo_svg_val']),
-            'General-2K': ','.join(['DIS-VD', 'TE-P3M-500-NP']),
-            'Matting': ','.join(['TE-P3M-500-NP', 'TE-AM-2k']),
-        }[self.task]
-        datasets_all = '+'.join([ds for ds in (os.listdir(os.path.join(self.data_root_dir, self.task)) if os.path.isdir(os.path.join(self.data_root_dir, self.task)) else []) if ds not in self.testsets.split(',')])
-        self.training_set = {
-            'DIS5K': ['DIS-TR', 'DIS-TR+DIS-TE1+DIS-TE2+DIS-TE3+DIS-TE4'][0],
-            'COD': 'TR-COD10K+TR-CAMO',
-            'HRSOD': ['TR-DUTS', 'TR-HRSOD', 'TR-UHRSD', 'TR-DUTS+TR-HRSOD', 'TR-DUTS+TR-UHRSD', 'TR-HRSOD+TR-UHRSD', 'TR-DUTS+TR-HRSOD+TR-UHRSD'][5],
-            'Custom': 'tshirt_logo_svg_train',
-            'General-2K': datasets_all,
-            'Matting': datasets_all,
-        }[self.task]
-
-        # Data settings
-        self.size = (1024, 1024) if self.task not in ['General-2K'] else (2560, 1440)   # wid, hei. Can be overwritten by dynamic_size in training.
-        self.dynamic_size = [None, ((512-256, 2048+256), (512-256, 2048+256))][0]    # wid, hei. It might cause errors in using compile.
-        self.background_color_synthesis = True             # whether to use pure bg color to replace the original backgrounds.
+        self.task = 'Matting'
 
         # Faster-Training settings
         self.precisionHigh = True
-        self.load_all = True and self.dynamic_size is True      # Turn it on/off by your case. It may consume a lot of CPU memory. And for multi-GPU (N), it would cost N times the CPU memory to load the data.
-                                                                # Machines with > 70GB CPU memory can run the whole training on DIS5K with default setting.
-                                                                # 2. Higher PyTorch version may fix it: https://github.com/pytorch/pytorch/issues/119607.
-                                                                # 3. But compile in 2.0.1 < Pytorch < 2.5.0 seems to bring no acceleration for training.
-
+       
         # MODEL settings
         self.ms_supervision = True
         self.out_ref = self.ms_supervision and True
@@ -62,17 +29,6 @@ class Config():
         self.dec_blk = ['BasicDecBlk', 'ResBlk'][0]
 
         # TRAINING settings
-        self.finetune_last_epochs = [
-            0,
-            {
-                'DIS5K': -40,
-                'COD': -20,
-                'HRSOD': -20,
-                'Custom': -20,
-                'General-2K': -20,
-                'Matting': -10,
-            }[self.task]
-        ][1]    # choose 0 to skip
         self.lr = 1e-5 #(1e-4 if 'DIS5K' in self.task else 1e-5) * math.sqrt(self.batch_size / 4)     # DIS needs high lr to converge faster. Adapt the lr linearly
         self.num_workers = 1 #max(4, self.batch_size)          # will be decreased to min(it, batch_size) at the initialization of the data_loader
 
@@ -115,14 +71,13 @@ class Config():
         ][0]
 
         # TRAINING settings - inactive
-        self.preproc_methods = ['flip', 'enhance', 'rotate', 'pepper', 'crop'][:4 if not self.background_color_synthesis else 1]
         self.optimizer = ['Adam', 'AdamW'][1]
         self.lr_decay_epochs = [1e5]    # Set to negative N to decay the lr in the last N-th epoch.
         self.lr_decay_rate = 0.5
         # Loss
         if self.task in ['Matting']:
             self.lambdas_pix_last = {
-                'bce': 30 * 1,
+                'bce': 10 * 1,
                 'iou': 0.5 * 0,
                 'iou_patch': 0.5 * 0,
                 'mae': 100 * 1,
@@ -164,29 +119,6 @@ class Config():
         self.lambdas_cls = {
             'ce': 5.0
         }
-
-        # PATH settings - inactive
-        self.weights_root_dir = os.path.join(self.sys_home_dir, 'weights/cv')
-        model_name_to_weights_file = {
-            'dino_v3_7b': 'vit_7b_patch16_dinov3.lvd1689m.pth', 'dino_v3_h_plus': 'vit_huge_plus_patch16_dinov3.lvd1689m.pth',
-            'dino_v3_l': 'vit_large_patch16_dinov3.lvd1689m.pth', 'dino_v3_b': 'vit_base_patch16_dinov3.lvd1689m.pth',
-            'dino_v3_s_plus': 'vit_small_plus_patch16_dinov3.lvd1689m.pth', 'dino_v3_s': 'vit_small_patch16_dinov3.lvd1689m.pth',
-            'swin_v1_l': 'swin_large_patch4_window12_384_22kto1k.pth', 'swin_v1_b': 'swin_base_patch4_window12_384_22kto1k.pth',
-            'swin_v1_t': 'swin_tiny_patch4_window7_224_22kto1k_finetune.pth', 'swin_v1_s': 'swin_small_patch4_window7_224_22kto1k_finetune.pth',
-            'pvt_v2_b5': 'pvt_v2_b5.pth', 'pvt_v2_b2': 'pvt_v2_b2.pth', 'pvt_v2_b1': 'pvt_v2_b1.pth', 'pvt_v2_b0': 'pvt_v2_b0.pth',
-        }
-        self.weights = {}
-        for model_name, weights_file in model_name_to_weights_file.items():
-            if 'dino_v3' in model_name:
-                model_name_dir = 'DINOv3-timm'
-            elif 'swin_v1' in model_name:
-                model_name_dir = ''
-            elif 'pvt_v2' in model_name:
-                model_name_dir = ''
-            else:
-                model_name_dir = ''
-            self.weights[model_name] = os.path.join(self.weights_root_dir, model_name_dir, weights_file)
-
 
         # Callbacks - inactive
         self.verbose_eval = True

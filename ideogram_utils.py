@@ -1,4 +1,5 @@
 import io
+import os
 import cairosvg
 import PIL
 from PIL import Image
@@ -6,6 +7,7 @@ import random
 import colorsys
 import numpy as np
 import cv2
+from PIL import ImageFilter
 
 def pil_image_to_bytes(pil_image: PIL.Image.Image) -> bytes:
     buffer = io.BytesIO()
@@ -113,6 +115,29 @@ def remove_background_info(caption: str) -> str:
     cleaned_caption = ".".join(cleaned_caption)
     return cleaned_caption
 
+def apply_artifacts(image: Image.Image) -> Image.Image:
+    img = image
+
+    if random.random() < 0.4:  # 60% chance
+        np_img = np.array(img).astype(np.float32)
+        noise_strength = random.uniform(2, 8)  # subtle
+        noise = np.random.normal(0, noise_strength, np_img.shape)
+        np_img = np.clip(np_img + noise, 0, 255).astype(np.uint8)
+        img = Image.fromarray(np_img, "RGB")
+
+    if random.random() < 0.5:  # 50% chance
+        blur_radius = random.uniform(0.2, 1.2)  # subtle blur
+        img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+    if random.random() < 0.4:  # 40% chance
+        buf = io.BytesIO()
+        quality = random.randint(80, 96)  # mild artifacts only
+        img.save(buf, format="JPEG", quality=quality)
+        buf.seek(0)
+        img = Image.open(buf).convert("RGB")
+
+    return img    
+
 def generate_background(
     width: int = 256,
     height: int = 256,
@@ -126,11 +151,13 @@ def generate_background(
       - 'uniform': uniform grey tones
       - 'gradient': smooth gradient between harmonized colors
       - 'green': green background (like a green screen)
+      - 'high_contrast': high contrast background
       - 'hard_negative': hard negative background
+      - 'synthetic': synthetic background
     """
     if mode is None:
-        sampling_weights = [0.3, 0.0, 0.3, 0.3]
-        mode = random.choices(["uniform", "gradient", "green", "hard_negative"], weights=sampling_weights)[0]
+        sampling_weights = [1/3, 1/3, 1/3]
+        mode = random.choices(["uniform", "high_contrast", "synthetic"], weights=sampling_weights)[0]
 
     # Utility: convert HSL → RGB [0-255]
     def hsl_to_rgb_tuple(h, s, l):
@@ -141,7 +168,8 @@ def generate_background(
     if mode == "uniform":
         img = np.zeros((height, width, 3), dtype=np.uint8)
         img[:, :, :] = random.randint(0, 255)
-        return Image.fromarray(img, "RGB")
+        img = apply_artifacts(Image.fromarray(img, "RGB"))
+        return img
 
     # --- GRADIENT (with hue harmony) ---
     elif mode == "gradient":
@@ -170,15 +198,34 @@ def generate_background(
 
         gradient = np.zeros((height, width, 3), dtype=np.uint8)
         for c in range(3):
-            gradient[:, :, c] = (start_color[c] * (1 - grad) + end_color[c] * grad).astype(np.uint8)
-
-        gradient = np.clip(gradient.astype(np.int16), 0, 255).astype(np.uint8)
-
-        return Image.fromarray(gradient, "RGB")
+            gradient[:, :, c] = (start_color[c] * (1 - grad) + end_color[c] * grad)
+        gradient = apply_artifacts(Image.fromarray(gradient, "RGB"))
+        return gradient
 
     # --- GREEN BACKGROUND ---
     elif mode == "green":
-        return Image.new("RGB", (width, height), (0, 255, 0))
+        # add a slight blur/noise to the image
+        img = np.zeros((height, width, 3), dtype=np.uint8)
+        img[:, :, :] = (0, 255, 0)
+        img = apply_artifacts(Image.fromarray(img, "RGB"))
+        return img
+
+    # --- GREEN BACKGROUND ---
+    elif mode == "high_contrast":
+        # add a slight blur/noise to the image
+        # RGB cube corners excluding black and white: R, G, B, Yellow, Magenta, Cyan
+        colors = [
+            (255, 0, 0),    # Red
+            (0, 255, 0),    # Green
+            (0, 0, 255),    # Blue
+            (255, 255, 0),  # Yellow
+            (255, 0, 255),  # Magenta
+            (0, 255, 255),  # Cyan
+        ]
+        img = np.zeros((height, width, 3), dtype=np.uint8)
+        img[:, :, :] = random.choice(colors)
+        img = apply_artifacts(Image.fromarray(img, "RGB"))
+        return img
 
     # --- HARD NEGATIVE BACKGROUND ---
     elif mode == "hard_negative":
@@ -201,8 +248,29 @@ def generate_background(
 
         color = np.clip(color_foreground_mean, 0, 255).astype(np.uint8)
         img = np.ones((height, width, 3), dtype=np.uint8) * color
+        img = apply_artifacts(Image.fromarray(img, "RGB"))
 
-        return Image.fromarray(img, "RGB")
+        return img
+
+    # --- SYNTHETIC BACKGROUND ---
+    elif mode == "synthetic":
+        # path to synthetic background images
+        path = "/home/gianfavero/projects/background-removal/data/background_gens"
+
+        # get a random image from the path
+        random_image = random.choice(os.listdir(path))
+
+        # open the image
+        try:
+            image = Image.open(os.path.join(path, random_image))
+        except Exception as e:
+            print(f"Error opening image: {e}")
+            return generate_background(width=width, height=height, mode='uniform')
+
+        # resize the image to the desired width and height
+        image = image.resize((width, height))
+
+        return image
     else:
         raise ValueError(f"Unknown background mode: {mode}")
 
