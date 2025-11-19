@@ -77,7 +77,7 @@ class Config():
         # Loss
         if self.task in ['Matting']:
             self.lambdas_pix_last = {
-                'bce': 10 * 1,
+                'bce': 25 * 1,
                 'iou': 0.5 * 0,
                 'iou_patch': 0.5 * 0,
                 'mae': 100 * 1,
