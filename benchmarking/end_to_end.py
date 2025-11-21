@@ -76,7 +76,7 @@ def generate_from_prompt(prompt, custom_model_uri=None, num_images=4) -> dict:
         logger.error(f"Unexpected error: {e}")
         raise
 
-    return [generate_result['data'][i]['image_bytes'] for i in range(len(generate_result['data']))]
+    return [result for result in generate_result['data']]
 
 def upscale_image(image: Image.Image) -> Image.Image:
     # API endpoint
@@ -84,7 +84,7 @@ def upscale_image(image: Image.Image) -> Image.Image:
 
     # Headers
     headers = {
-        "X-API-Key": None # TODO: Add API key
+        "X-API-Key": "b381ec31-cb6b-4639-89f4-6f42998de22b" # TODO: Add API key
     }
 
     # Save PIL image to buffer as png
@@ -107,7 +107,8 @@ def upscale_image(image: Image.Image) -> Image.Image:
     return response
 
 def main(custom_model_uri: str=None, prompt: str=None):
-    images_bytes = generate_from_prompt(prompt, custom_model_uri, num_images=1)
+    result = generate_from_prompt(prompt, custom_model_uri, num_images=1)
+    images_bytes = [result[i]['image_bytes'] for i in range(len(result))]
     images_pil = [Image.open(io.BytesIO(image_byte)) for image_byte in images_bytes]
 
     # Upscale images using Topaz Labs API
@@ -116,7 +117,7 @@ def main(custom_model_uri: str=None, prompt: str=None):
 
 if __name__ == "__main__":
 
-    API_KEY = None # TODO: Add API key
+    API_KEY = "doGxpC8NIq50eB_6AVZ6dhaOoBFQ-1GxTX2F0KR1UHqWty0ale_QF-xNvU2IH7GR7JpE4HMWKPT0DlpVBKXl4g" # TODO: Add API key
     os.environ['IDEOGRAM_API_KEY'] = API_KEY
 
     custom_model_uri = "model/gian-green-graphic-2k/version/0"
