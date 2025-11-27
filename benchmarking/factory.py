@@ -109,9 +109,9 @@ class BiRefNet_Custom(BaseModel):
         # Clean up the keys
         clean_state_dict = OrderedDict()
         for k, v in state_dict.items():
-            k = k.split(".")[1:]
-            k = ".".join(k)
-            k = k.replace("module._orig_mod.", "")
+            # k = k.split(".")[1:]
+            # k = ".".join(k)
+            # k = k.replace("module._orig_mod.", "")
             clean_state_dict[k] = v
 
         self.model.load_state_dict(clean_state_dict)

@@ -295,7 +295,7 @@ def FB_blur_fusion_foreground_estimator_cpu_2(image, alpha, r=90):
     FG, blur_B = FB_blur_fusion_foreground_estimator_cpu(image, image, image, alpha, r)
     return FB_blur_fusion_foreground_estimator_cpu(image, FG, blur_B, alpha, r=6)[0]
 
-def reduce_spill(image, mask, r=90) -> Image.Image:
+def fast_foreground_estimation(image, mask, r=90) -> Image.Image:
     image = np.array(image, dtype=np.float32) / 255.0
     mask = np.array(mask, dtype=np.float32) / 255.0
     estimated_foreground = FB_blur_fusion_foreground_estimator_cpu_2(image, mask, r=r)
@@ -305,7 +305,7 @@ def reduce_spill(image, mask, r=90) -> Image.Image:
 
     return estimated_foreground
 
-def recover_original_rgba(composited_rgb, alpha, bg_color=(0,255,0)):
+def revert_alpha_blend(composited_rgb, alpha, bg_color=(0,255,0)):
     """
     Recover original RGBA after compositing on a solid background.
     
